@@ -1,21 +1,15 @@
-/media/data/wj/anaconda3/envs/tensorflow/bin/python3.5 /media/data/wj/imagenet_ace/imagenet_svd_v4.py
-WARNING:tensorflow:From /media/data/wj/imagenet_ace/imagenet_svd_v4.py:398: softmax_cross_entropy_with_logits (from tensorflow.python.ops.nn_ops) is deprecated and will be removed in a future version.
-Instructions for updating:
+# 验证的数据百分比
+VALIDATION_PERCENTAGE = 10
+# 测试的数据百分比
+TEST_PERCENTAGE = 10
 
-Future major versions of TensorFlow will allow gradients to flow
-into the labels input on backprop by default.
+# 定义神经网络的设置
+LEARNING_RATE = 0.01
+STEPS = 5000
+BATCH = 100
+TRAINING_SIZE = 50000
+VALIDATION_SIZE = 50000
 
-See tf.nn.softmax_cross_entropy_with_logits_v2.
-
-2018-06-30 17:30:13.345588: I tensorflow/core/platform/cpu_feature_guard.cc:140] Your CPU supports instructions that this TensorFlow binary was not compiled to use: AVX2 FMA
-2018-06-30 17:30:13.429674: I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:898] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-2018-06-30 17:30:13.429923: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1212] Found device 0 with properties: 
-name: GeForce GTX 1080 Ti major: 6 minor: 1 memoryClockRate(GHz): 1.683
-pciBusID: 0000:01:00.0
-totalMemory: 10.91GiB freeMemory: 10.41GiB
-2018-06-30 17:30:13.429932: I tensorflow/core/common_runtime/gpu/gpu_device.cc:1312] Adding visible gpu devices: 0
-2018-06-30 17:30:13.582104: I tensorflow/core/common_runtime/gpu/gpu_device.cc:993] Creating TensorFlow device (/job:localhost/replica:0/task:0/device:GPU:0 with 10076 MB memory) -> physical GPU (device: 0, name: GeForce GTX 1080 Ti, pci bus id: 0000:01:00.0, compute capability: 6.1)
-2018-06-30 17:30:14.012136: W tensorflow/core/framework/op_def_util.cc:343] Op BatchNormWithGlobalNormalization is deprecated. It will cease to work in GraphDef version 9. Use tf.nn.batch_normalization().
 (test) load 1000 images. cal BN time: 32.320s. 
 (test) load 2000 images. cal BN time: 31.487s. 
 (test) load 3000 images. cal BN time: 31.411s. 
