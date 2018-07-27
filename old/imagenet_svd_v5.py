@@ -1,59 +1,60 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# testing dateset -> val set
 
 import glob
-import os
+import os.path
 import random
 import numpy as np
 import tensorflow as tf
 import time
-import sys
+from multiprocessing import Pool
+#from multiprocessing.dummy import Pool as ThreadPool
 from fbpca import pca
 from tensorflow.python.platform import gfile
 
 
+# Inception-v3模型瓶颈层的节点个数
 BOTTLENECK_TENSOR_SIZE = 2048
+bottleneck_values = []
 
-# tensor name of the output of Inception-v3
+# Inception-v3模型中代表瓶颈层结果的张量名称。
+# 在谷歌提出的Inception-v3模型中，这个张量名称就是'pool_3/_reshape:0'。
+# 在训练模型时，可以通过tensor.name来获取张量的名称。
 BOTTLENECK_TENSOR_NAME = 'pool_3/_reshape:0'
 
-# tensor name of the image input
+# 图像输入张量所对应的名称。
 JPEG_DATA_TENSOR_NAME = 'DecodeJpeg/contents:0'
 
-# Inception-v3 model
+# 下载的谷歌训练好的Inception-v3模型文件目录
 MODEL_DIR = 'model/'
+
+# 下载的谷歌训练好的Inception-v3模型文件名
 MODEL_FILE = 'tensorflow_inception_graph.pb'
 
-# testing dataset(validation dataset of imagenet 2012)
-TEST_DIR = 'val/'
-TEST_GROUND_TRUTH_FILE = 'ILSVRC2012_validation_ground_truth.txt'
-TEST_SIZE = 10000
-
-# use to store bottleneck value
+# 因为一个训练数据会被使用多次，所以可以将原始图像通过Inception-v3模型计算得到的特征向量保存在文件中，免去重复的计算。
+# 下面的变量定义了这些文件的存放地址。
 CACHE_DIR = 'tmp/bottleneck/'
 
-# training dataset(training dataset of imagenet 2012)
+# 图片数据文件夹。
+# 在这个文件夹中每一个子文件夹代表一个需要区分的类别，每个子文件夹中存放了对应类别的图片。
 INPUT_DATA = '../../Imagenet'
 
-# percentage of imagenet 2012 training dataset that will be used as validation dataset in our program
+# 验证的数据百分比
 VALIDATION_PERCENTAGE = 10
-# percentage of imagenet 2012 training dataset that will be used as testing dataset in our program
-# (no use anymore!)
-TEST_PERCENTAGE = 10
+# 测试的数据百分比
+TEST_PERCENTAGE = 1
 
-# define the parameters
+# 定义神经网络的设置
 LEARNING_RATE = 0.01
-STEPS = 10000
-BATCH = 200
-
-# how many training and validation images we want to use
-TRAINING_SIZE = 10000
-VALIDATION_SIZE = 10000
-
+STEPS = 5000
+BATCH = 120
+TRAINING_SIZE = 1200
+VALIDATION_SIZE = 1200
 
 class NodeLookup(object):
-  def __init__(self, label_lookup_path=None, uid_lookup_path=None):
+  def __init__(self,
+               label_lookup_path=None,
+               uid_lookup_path=None):
     if not label_lookup_path:
       label_lookup_path = 'model2/imagenet_2012_challenge_label_map_proto.pbtxt'
     if not uid_lookup_path:
@@ -118,7 +119,7 @@ def create_image_lists(testing_percentage, validation_percentage):
         for file_name in file_list:
             base_name = os.path.basename(file_name)
             # 随机将数据分到训练数据集、测试数据集和验证数据集。
-            chance = np.random.randint(100)
+            chance = np.random.randint(10000)
             if chance < validation_percentage:
                 validation_images.append(base_name)
             elif chance < (testing_percentage + validation_percentage):
@@ -164,16 +165,20 @@ def get_bottlenect_path(image_lists, label_name, index, category):
     return get_image_path(image_lists, CACHE_DIR, label_name, index, category) + '.txt';
 
 
-def run_bottleneck_on_image(sess, image_data, image_data_tensor, bottleneck_tensor):
+def run_bottleneck_on_image(sess, image_data, image_data_tensor, bottleneck_tensor, category):
     # 这个过程实际上就是将当前图片作为输入计算瓶颈张量的值。这个瓶颈张量的值就是这张图片的新的特征向量。
+    time_x = time.clock()
     bottleneck_values = sess.run(bottleneck_tensor, {image_data_tensor: image_data})
     # 经过卷积神经网络处理的结果是一个四维数组，需要将这个结果压缩成一个特征向量（一维数组）
+    time_y = time.clock()
     bottleneck_values = np.squeeze(bottleneck_values)
+    time_z = time.clock()
     return bottleneck_values
 
 
 # 这个函数使用加载的训练好的Inception-v3模型处理一张图片，得到这个图片的特征向量。
-def run_bottleneck_on_images(sess, image_datas, image_data_tensor, bottleneck_tensor):
+def run_bottleneck_on_images(sess, image_datas, image_data_tensor, bottleneck_tensor, size):
+    # 这个过程实际上就是将当前图片作为输入计算瓶颈张量的值。这个瓶颈张量的值就是这张图片的新的特征向量。
     bottleneck_values = []
     # 这个过程实际上就是将当前图片作为输入计算瓶颈张量的值。这个瓶颈张量的值就是这张图片的新的特征向量。
     for image_data in image_datas:
@@ -185,76 +190,55 @@ def run_bottleneck_on_images(sess, image_datas, image_data_tensor, bottleneck_te
 
 # 这个函数获取一张图片经过Inception-v3模型处理之后的特征向量。
 # 这个函数会先试图寻找已经计算且保存下来的特征向量，如果找不到则先计算这个特征向量，然后保存到文件。
-def get_or_create_bottleneck(sess, image_lists, label_name, index, category, jpeg_data_tensor, bottleneck_tensor):
+def get_or_create_bottleneck(sess, image_lists, label_name, image_index, category, jpeg_data_tensor, bottleneck_tensor):
     # 获取一张图片对应的特征向量文件的路径。
     label_lists = image_lists[label_name]
-    sub_dir = label_lists['dir']
-    sub_dir_path = os.path.join(CACHE_DIR, sub_dir)
-    if not os.path.exists(sub_dir_path):
-        os.makedirs(sub_dir_path)
-    bottleneck_path = get_bottlenect_path(image_lists, label_name, index, category)
-
+    #sub_dir = label_lists['dir']
+    #sub_dir_path = os.path.join(CACHE_DIR, sub_dir)
+    #if not os.path.exists(sub_dir_path):
+    #    os.makedirs(sub_dir_path)
+    bottleneck_path = get_bottlenect_path(image_lists, label_name, image_index, category)
     # 获取原始的图片路径
-    image_path = get_image_path(image_lists, INPUT_DATA, label_name, index, category)
+    image_path = get_image_path(image_lists, INPUT_DATA, label_name, image_index, category)
     # 获取图片内容。
     image_data = gfile.FastGFile(image_path, 'rb').read()
     softmax_tensor = sess.graph.get_tensor_by_name('softmax:0')
     predictions = sess.run(softmax_tensor, {'DecodeJpeg/contents:0': image_data})
     predictions = np.squeeze(predictions)
+    node_lookup = NodeLookup()
     node_id = int(np.squeeze(np.where(predictions == np.max(predictions))))
-
+    stringid = node_lookup.id_to_string(node_id)
+    if stringid == label_name:
+        correct_classify = 1
+    else:
+        correct_classify = 0
+    # 如果这个特征向量文件不存在，则通过Inception-v3模型来计算特征向量，并将计算的结果存入文件。
     if not os.path.exists(bottleneck_path):
         # 由于输入的图片大小不一致，此处得到的image_data大小也不一致（已验证），但却都能通过加载的inception-v3模型生成一个2048的特征向量。具体原理不详。
         # 通过Inception-v3模型计算特征向量
         time_0 = time.clock()
-        bottleneck_values = run_bottleneck_on_image(sess, image_data, jpeg_data_tensor, bottleneck_tensor)
+        bottleneck_values = run_bottleneck_on_image(sess, image_data, jpeg_data_tensor, bottleneck_tensor, category)
         time_1 = time.clock()
         cal_time = time_1 - time_0
         # 将计算得到的特征向量存入文件
-        bottleneck_string = ','.join(str(x) for x in bottleneck_values)
-        with open(bottleneck_path, 'w') as bottleneck_file:
-            bottleneck_file.write(bottleneck_string)
+        #bottleneck_string = ','.join(str(x) for x in bottleneck_values)
+        #with open(bottleneck_path, 'w') as bottleneck_file:
+        #    bottleneck_file.write(bottleneck_string)
+
     else:
         # 直接从文件中获取图片相应的特征向量。
-        time_0 = time.clock()
         with open(bottleneck_path, 'r') as bottleneck_file:
             bottleneck_string = bottleneck_file.read()
         bottleneck_values = [float(x) for x in bottleneck_string.split(',')]
-        time_1 = time.clock()
-        cal_time = time_1 - time_0
     # 返回得到的特征向量
-    return bottleneck_values, node_id, cal_time
-
-def create_test_bottleneck(sess, image_path, jpeg_data_tensor, bottleneck_tensor):
-
-    image_data = gfile.FastGFile(image_path, 'rb').read()
-    softmax_tensor = sess.graph.get_tensor_by_name('softmax:0')
-    predictions = sess.run(softmax_tensor, {'DecodeJpeg/contents:0': image_data})
-    predictions = np.squeeze(predictions)
-    node_id = int(np.squeeze(np.where(predictions == np.max(predictions))))
-    # 由于输入的图片大小不一致，此处得到的image_data大小也不一致（已验证），但却都能通过加载的inception-v3模型生成一个2048的特征向量。具体原理不详。
-    # 通过Inception-v3模型计算特征向量
-    time_0 = time.clock()
-    bottleneck_values = run_bottleneck_on_image(sess, image_data, jpeg_data_tensor, bottleneck_tensor)
-    time_1 = time.clock()
-    cal_time = time_1 - time_0
-
-    # 返回得到的特征向量
-    return bottleneck_values, node_id, cal_time
+    return bottleneck_values, correct_classify, cal_time
 
 
 def get_fixed_size_bottlenecks(sess, n_classes, image_lists, how_many, category, jpeg_data_tensor, bottleneck_tensor):
-    if category == 'training':
-        bottlenecks = np.zeros((TRAINING_SIZE, 2048), dtype=float)
-        ground_truths = np.zeros((TRAINING_SIZE, 1000), dtype=float)
-    if category == 'validation':
-        bottlenecks = np.zeros((VALIDATION_SIZE, 2048), dtype=float)
-        ground_truths = np.zeros((VALIDATION_SIZE, 1000), dtype=float)
-    #image_datas = []
-    #ground_truths_wait_for_add = []
-    #bottleneck_paths = []
+    bottlenecks = np.zeros((TRAINING_SIZE, 2048), dtype=float)
+    ground_truths = np.zeros((TRAINING_SIZE, 1000), dtype=float)
+    image_datas = []
     i = 0
-    #k = 0
     time1 = 0
     while i < how_many:
         # 随机一个类别和图片的编号加入当前的训练数据。
@@ -262,64 +246,56 @@ def get_fixed_size_bottlenecks(sess, n_classes, image_lists, how_many, category,
         label_name = list(image_lists.keys())[label_index]
         image_index = random.randrange(65536)
         label_lists = image_lists[label_name]
-        sub_dir = label_lists['dir']
-        sub_dir_path = os.path.join(CACHE_DIR, sub_dir)
-        if not os.path.exists(sub_dir_path):
-            os.makedirs(sub_dir_path)
+        #sub_dir = label_lists['dir']
+        #sub_dir_path = os.path.join(CACHE_DIR, sub_dir)
+        #if not os.path.exists(sub_dir_path):
+        #    os.makedirs(sub_dir_path)
         bottleneck_path = get_bottlenect_path(image_lists, label_name, image_index, category)
-        ground_truth = np.zeros(n_classes, dtype=np.float32)
-        ground_truth[label_index] = 1.0
         # 如果这个特征向量文件不存在，则通过Inception-v3模型来计算特征向量，并将计算的结果存入文件。
         if not os.path.exists(bottleneck_path):
             image_path = get_image_path(image_lists, INPUT_DATA, label_name, image_index, category)
             image_data = gfile.FastGFile(image_path, 'rb').read()
-            #image_datas.append(image_data)
-            #ground_truths_wait_for_add.append(ground_truth)
-            #bottleneck_paths.append(bottleneck_path)
-            #k = k + 1
-            time_0 = time.clock()
-            bottleneck_value = run_bottleneck_on_image(sess, image_data, jpeg_data_tensor, bottleneck_tensor)
-            time_1 = time.clock()
-            time1 = time1 + time_1 - time_0
-            bottleneck_string = ','.join(str(x) for x in bottleneck_value)
-            with open(bottleneck_path, 'w') as bottleneck_file:
-                bottleneck_file.write(bottleneck_string)
-            bottlenecks[i] = bottleneck_value
+            image_datas.append(image_data)
+            ground_truth = np.zeros(n_classes, dtype=np.float32)
+            ground_truth[label_index] = 1.0
             ground_truths[i] = ground_truth
             i = i + 1
-            '''if k % BATCH == 0 or i + k == how_many:
+            if i % BATCH == 0 or i == how_many:
+                if i == how_many and how_many % BATCH != 0:
+                    size = how_many % BATCH
+                else:
+                    size = BATCH
+
                 time_0 = time.clock()
-                bottleneck_values = run_bottleneck_on_images(sess, image_datas, jpeg_data_tensor, bottleneck_tensor)
+                bottleneck_values = run_bottleneck_on_images(sess, image_datas, jpeg_data_tensor, bottleneck_tensor, size)
+                '''
+                threads = []
+                for x in range(size):
+                    t = threading.Thread(target = run_bottleneck_on_images, args = (sess,image_datas[x],
+                                                jpeg_data_tensor,bottleneck_tensor,x,bottleneck_values))
+                    threads.append(t)
+                time_m = time.clock()
+                for thr in threads:
+                    thr.start()
+                time_n = time.clock()
+                for thr in threads:
+                    if thr.isAlive():
+                        thr.join()
+                '''
+                time_o = time.clock()
+                #print('start at:', time_m, ' end at: ', time_o)
+                image_datas = []
                 time_1 = time.clock()
                 time1 = time1 + time_1 - time_0
-                j = 0
+                j = size
                 for bottleneck_value in bottleneck_values:
-                    bottleneck_string = ','.join(str(x) for x in bottleneck_value)
-                    bottleneck_path = bottleneck_paths[j]
-                    with open(bottleneck_path, 'w') as bottleneck_file:
-                        bottleneck_file.write(bottleneck_string)
-                    bottlenecks[i + j] = bottleneck_value
-                    ground_truths[i + j] = ground_truths_wait_for_add[j]
-                    j = j + 1
-                ground_truths_wait_for_add = []
-                bottleneck_paths = []
-                image_datas = []
-                i = i + k
-                k = 0
-            '''
-        else:
-            # 直接从文件中获取图片相应的特征向量。
-            time_0 = time.clock()
-            with open(bottleneck_path, 'r') as bottleneck_file:
-                bottleneck_string = bottleneck_file.read()
-            bottleneck_value = [float(x) for x in bottleneck_string.split(',')]
-            bottlenecks[i] = bottleneck_value
-            ground_truths[i] = ground_truth
-            time_1 = time.clock()
-            time1 = time1 + time_1 - time_0
-            i = i + 1
+                    #bottleneck_string = ','.join(str(x) for x in bottleneck_value)
+                    #with open(bottleneck_path, 'w') as bottleneck_file:
+                    #    bottleneck_file.write(bottleneck_string)
+                    bottlenecks[i-j] = bottleneck_value
+                    j = j - 1
 
-        if i % 2000 == 0 and i != 0:
+        if i % 1024 == 0:
             print('load %d images. cal BN time: %.3fs. ' % (i, time1))
             time1 = 0
 
@@ -339,41 +315,29 @@ def get_random_cached_bottlenecks(MA, MB):
 # 这个函数获取全部的测试数据。在最终测试的时候需要在所有的测试数据上计算正确率。
 def get_test_bottlenecks(sess, image_lists, n_classes, jpeg_data_tensor, bottleneck_tensor):
     bottlenecks = []
-    inception_node_id = []
-    image_path_list = []
+    ground_truths = []
+    correct_classify_count = []
     i = 0
-    correct_classify_count = 0
     cal_bn_time = 0
-    node_lookup = NodeLookup()
-    ground_truths = np.zeros((TEST_SIZE, 1000), dtype=float)
+    label_name_list = list(image_lists.keys())
     # 枚举所有的类别和每个类别中的测试图片。
-    with open(TEST_GROUND_TRUTH_FILE) as f:
-        content = f.readlines()
-        content = [x.strip() for x in content]
-    for file in os.listdir(TEST_DIR):
-        if file.endswith(".JPEG"):
-            image_path_list.append(os.path.join(TEST_DIR, file))
-    image_path_list.sort()
-    for image_path in image_path_list:
-        # 通过Inception-v3模型计算图片对应的特征向量，并将其加入最终数据的列表。
-        bottleneck, node_id, cal_time = create_test_bottleneck(sess, image_path, jpeg_data_tensor, bottleneck_tensor)
-        cal_bn_time = cal_bn_time + cal_time
-        inception_node_id.append(node_id)
-        bottlenecks.append(bottleneck)
-        i = i + 1
-
-        if i % 10000 == 0:
-            print('(test) load %d images. cal BN time: %.3fs. ' % (i, cal_bn_time))
-            cal_bn_time = 0
-            break
-    for j in range(TEST_SIZE):
-        string_id = node_lookup.id_to_string(int(content[j]))
-        label_index = list(image_lists.keys()).index(string_id)
-        ground_truths[j][label_index] = 1
-        if int(content[j]) == inception_node_id[j]:
-            correct_classify_count = correct_classify_count + 1
-    inception_accuracy = correct_classify_count / TEST_SIZE
-    return bottlenecks, ground_truths, inception_accuracy
+    for label_index, label_name in enumerate(label_name_list):
+        category = 'testing'
+        for index, unused_base_name in enumerate(image_lists[label_name][category]):
+            # 通过Inception-v3模型计算图片对应的特征向量，并将其加入最终数据的列表。
+            bottleneck, correct_classify, cal_time = get_or_create_bottleneck(sess, image_lists, label_name, index, category,
+                                                  jpeg_data_tensor, bottleneck_tensor)
+            cal_bn_time = cal_bn_time + cal_time
+            correct_classify_count.append(correct_classify)
+            bottlenecks.append(bottleneck)
+            ground_truth = np.zeros(n_classes, dtype = np.float32)
+            ground_truth[label_index] = 1.0
+            ground_truths.append(ground_truth)
+            i = i + 1
+            if i % 1024 == 0:
+                print('(test) load %d images. cal BN time: %.3fs. ' % (i, cal_bn_time))
+                cal_bn_time = 0
+    return bottlenecks, ground_truths, correct_classify_count
 
 
 def svd_test(singular_value_number, n_classes, bottlenecks_t1, ground_truth_t1,
@@ -382,23 +346,18 @@ def svd_test(singular_value_number, n_classes, bottlenecks_t1, ground_truth_t1,
     ground_truth_input = tf.placeholder(tf.float32, [None, n_classes], name='GroundTruthInput')
     # 定义一层全连接层来解决新的图片分类问题。
     # 因为训练好的Inception-v3模型已经将原始的图片抽象为了更加容易分类的特征向量了，所以不需要再训练那么复杂的神经网络来完成这个新的分类任务。
-    with tf.name_scope('second_last_training_ops'):
-        weights_1 = tf.Variable(tf.truncated_normal([singular_value_number, singular_value_number], stddev=0.001))
-        biases_1 = tf.Variable(tf.zeros([singular_value_number]))
-        logits_1 = tf.matmul(bottleneck_input, weights_1) + biases_1
-        final_tensor_1 = tf.nn.relu(logits_1)
     with tf.name_scope('final_training_ops'):
-        weights_2 = tf.Variable(tf.truncated_normal([singular_value_number, n_classes], stddev=0.001))
-        biases_2 = tf.Variable(tf.zeros([n_classes]))
-        logits_2 = tf.matmul(final_tensor_1, weights_2) + biases_2
-        final_tensor_2 = tf.nn.softmax(logits_2)
+        weights = tf.Variable(tf.truncated_normal([singular_value_number, n_classes], stddev=0.001))
+        biases = tf.Variable(tf.zeros([n_classes]))
+        logits = tf.matmul(bottleneck_input, weights) + biases
+        final_tensor = tf.nn.softmax(logits)
     # 定义交叉熵损失函数
-    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits_2, labels=ground_truth_input)
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=ground_truth_input)
     cross_entropy_mean = tf.reduce_mean(cross_entropy)
     train_step = tf.train.GradientDescentOptimizer(LEARNING_RATE).minimize(cross_entropy_mean)
     # 计算正确率
     with tf.name_scope('evaluation'):
-        correct_prediction = tf.equal(tf.argmax(final_tensor_2, 1), tf.argmax(ground_truth_input, 1))
+        correct_prediction = tf.equal(tf.argmax(final_tensor, 1), tf.argmax(ground_truth_input, 1))
         evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
     bottlenecks_t1_array = np.array(bottlenecks_t1)
@@ -417,7 +376,7 @@ def svd_test(singular_value_number, n_classes, bottlenecks_t1, ground_truth_t1,
             train_bottlenecks, train_ground_truth = get_random_cached_bottlenecks(bottlenecks_after_svd_t2, ground_truth_t2)
             sess2.run(train_step, feed_dict={bottleneck_input: train_bottlenecks, ground_truth_input: train_ground_truth})
             # 在验证集上测试正确率。
-            if i % 500 == 0 or i + 1 == STEPS:
+            if i % 200 == 0 or i + 1 == STEPS:
                 validation_bottlenecks, validation_ground_truth = get_random_cached_bottlenecks(bottlenecks_after_svd_v, ground_truth_v)
                 validation_accuracy = sess2.run(evaluation_step, feed_dict={
                     bottleneck_input: validation_bottlenecks, ground_truth_input: validation_ground_truth})
@@ -427,7 +386,6 @@ def svd_test(singular_value_number, n_classes, bottlenecks_t1, ground_truth_t1,
     # 在最后的测试数据上测试正确率
         test_accuracy = sess2.run(evaluation_step, feed_dict={bottleneck_input: test_bottlenecks_after_svd,
                                                          ground_truth_input: test_ground_truth})
-        #print(sess2.run(tf.argmax(final_tensor, 1), feed_dict={bottleneck_input: test_bottlenecks_after_svd}))
     print('Final test accuracy (svd %d) = %.1f%%' % (singular_value_number, test_accuracy * 100))
 
 
@@ -442,9 +400,9 @@ def create_graph():
                                                                                               JPEG_DATA_TENSOR_NAME])
         return bottleneck_tensor, jpeg_data_tensor
 
+
 def main():
     # 读取所有图片。
-    sys.stdout = open("test.txt", "w")
     image_lists = create_image_lists(TEST_PERCENTAGE, VALIDATION_PERCENTAGE)
     n_classes = len(image_lists.keys())
     # 读取已经训练好的Inception-v3模型。
@@ -457,34 +415,28 @@ def main():
     ground_truth_input = tf.placeholder(tf.float32, [None, n_classes], name='GroundTruthInput')
     # 定义一层全连接层来解决新的图片分类问题。
     # 因为训练好的Inception-v3模型已经将原始的图片抽象为了更加容易分类的特征向量了，所以不需要再训练那么复杂的神经网络来完成这个新的分类任务。
-    with tf.name_scope('second_last_training_ops'):
-        weights_1 = tf.Variable(tf.truncated_normal([BOTTLENECK_TENSOR_SIZE, BOTTLENECK_TENSOR_SIZE], stddev=0.001))
-        biases_1 = tf.Variable(tf.zeros([BOTTLENECK_TENSOR_SIZE]))
-        logits_1 = tf.matmul(bottleneck_input, weights_1) + biases_1
-        final_tensor_1 = tf.nn.relu(logits_1)
     with tf.name_scope('final_training_ops'):
-        weights_2 = tf.Variable(tf.truncated_normal([BOTTLENECK_TENSOR_SIZE, n_classes], stddev=0.001))
-        biases_2 = tf.Variable(tf.zeros([n_classes]))
-        logits_2 = tf.matmul(final_tensor_1, weights_2) + biases_2
-        final_tensor_2 = tf.nn.softmax(logits_2)
+        weights = tf.Variable(tf.truncated_normal([BOTTLENECK_TENSOR_SIZE, n_classes], stddev=0.001))
+        biases = tf.Variable(tf.zeros([n_classes]))
+        logits = tf.matmul(bottleneck_input, weights) + biases
+        final_tensor = tf.nn.softmax(logits)
 
     # 定义交叉熵损失函数
-    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits_2, labels=ground_truth_input)
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels=ground_truth_input)
     cross_entropy_mean = tf.reduce_mean(cross_entropy)
     train_step = tf.train.GradientDescentOptimizer(LEARNING_RATE).minimize(cross_entropy_mean)
 
     # 计算正确率
     with tf.name_scope('evaluation'):
-        correct_prediction = tf.equal(tf.argmax(final_tensor_2, 1), tf.argmax(ground_truth_input, 1))
+        correct_prediction = tf.equal(tf.argmax(final_tensor, 1), tf.argmax(ground_truth_input, 1))
         evaluation_step = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.7)
-    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
+    with tf.Session() as sess:
         tf.global_variables_initializer().run()
 
-        test_bottlenecks, test_ground_truth, inception_accuracy = get_test_bottlenecks(sess, image_lists, n_classes,
-                                                                                jpeg_data_tensor, bottleneck_tensor)
-
-        print('Inception accuracy (original) = %.3f%%' % (inception_accuracy * 100))
+        test_bottlenecks, test_ground_truth, correct_classify_count = get_test_bottlenecks(sess, image_lists,
+                                                        n_classes, jpeg_data_tensor, bottleneck_tensor)
+        Inception_accuracy = float(np.sum(correct_classify_count) / len(correct_classify_count))
+        print('Inception accuracy (original) = %.3f%%' % (Inception_accuracy * 100))
 
         bottlenecks_t1, ground_truth_t1 = get_fixed_size_bottlenecks(sess, n_classes, image_lists,
                                              TRAINING_SIZE, 'training', jpeg_data_tensor,bottleneck_tensor)
@@ -502,22 +454,24 @@ def main():
             train_bottlenecks, train_ground_truth = get_random_cached_bottlenecks( bottlenecks_t, ground_truth_t)
             sess.run(train_step, feed_dict={bottleneck_input: train_bottlenecks, ground_truth_input: train_ground_truth})
             # 在验证集上测试正确率。
-            if i%500 == 0 or i+1 == STEPS:
+            if i%100 == 0 or i+1 == STEPS:
                 validation_bottlenecks, validation_ground_truth = get_random_cached_bottlenecks(bottlenecks_v, ground_truth_v)
                 validation_accuracy = sess.run(evaluation_step, feed_dict={
                     bottleneck_input: validation_bottlenecks, ground_truth_input: validation_ground_truth})
-                #print(sess.run(tf.argmax(final_tensor, 1), feed_dict={bottleneck_input: bottlenecks_v}))
                 print('Step %d: Validation accuracy on random sampled %d examples = %.1f%%'
                       % (i, BATCH, validation_accuracy*100))
 
         # 在最后的测试数据上测试正确率
         test_accuracy = sess.run(evaluation_step, feed_dict={bottleneck_input: test_bottlenecks,
                                                              ground_truth_input: test_ground_truth})
-        #print(sess.run(tf.argmax(final_tensor, 1), feed_dict={bottleneck_input: test_bottlenecks}))
 
         print('Final test accuracy (original) = %.1f%%' % (test_accuracy * 100))
 
+        #np.savetxt('matrix_ILSVRC2012_img_train_t3.csv', A, delimiter=',')
+        #(u, sigma, vt) = pca(A, 200, True)
+        #np.savetxt('value_ILSVRC2012_img_train_t3.csv', sigma, delimiter=',')
 
+    '''
     #svd
     svd_test(1024, n_classes, bottlenecks_t1, ground_truth_t1,
              test_bottlenecks, test_ground_truth, bottlenecks_t2, ground_truth_t2, bottlenecks_v, ground_truth_v)
@@ -531,7 +485,7 @@ def main():
              test_bottlenecks, test_ground_truth, bottlenecks_t2, ground_truth_t2, bottlenecks_v, ground_truth_v)
     svd_test(32, n_classes, bottlenecks_t1, ground_truth_t1,
              test_bottlenecks, test_ground_truth, bottlenecks_t2, ground_truth_t2, bottlenecks_v, ground_truth_v)
-
+    '''
 
 if __name__ == '__main__':
     main()
